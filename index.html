@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Undertale-Style SOUL Dodge</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #000;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      font-family: "Courier New", Courier, monospace;
+      color: #fff;
+      user-select: none;
+    }
+
+    h1 {
+      font-size: 1.4rem;
+      letter-spacing: 0.1em;
+      margin-bottom: 0.4rem;
+      color: #fff;
+    }
+
+    #subtitle {
+      font-size: 0.75rem;
+      color: #aaa;
+      margin-bottom: 1.2rem;
+      letter-spacing: 0.05em;
+    }
+
+    #battle-box {
+      position: relative;
+      width: 240px;
+      height: 180px;
+      border: 4px solid #fff;
+      background: #000;
+      overflow: hidden;
+    }
+
+    #soul {
+      position: absolute;
+      width: 16px;
+      height: 16px;
+    }
+
+    .bullet {
+      position: absolute;
+      background: #fff;
+      border-radius: 50%;
+    }
+
+    #hud {
+      margin-top: 0.9rem;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.35rem;
+    }
+
+    #hp-label {
+      font-size: 0.85rem;
+      letter-spacing: 0.08em;
+    }
+
+    #hp-bar-outer {
+      width: 240px;
+      height: 14px;
+      border: 2px solid #fff;
+      background: #000;
+    }
+
+    #hp-bar-inner {
+      height: 100%;
+      background: #ff0;
+      transition: width 0.1s;
+    }
+
+    #score-label {
+      font-size: 0.8rem;
+      color: #aaa;
+      letter-spacing: 0.06em;
+    }
+
+    #message {
+      margin-top: 1rem;
+      font-size: 1rem;
+      min-height: 1.5em;
+      letter-spacing: 0.05em;
+      text-align: center;
+    }
+
+    #restart-btn {
+      display: none;
+      margin-top: 0.8rem;
+      padding: 0.4em 1.2em;
+      background: #fff;
+      color: #000;
+      border: none;
+      font-family: inherit;
+      font-size: 0.9rem;
+      letter-spacing: 0.08em;
+      cursor: pointer;
+    }
+
+    #restart-btn:hover { background: #ff0; }
+
+    #instructions {
+      margin-top: 1.2rem;
+      font-size: 0.7rem;
+      color: #555;
+      text-align: center;
+      line-height: 1.6;
+    }
+  </style>
+</head>
+<body>
+
+  <h1>★ UNDERTALE MINIGAME ★</h1>
+  <div id="subtitle">* Dodge the bones!</div>
+
+  <div id="battle-box">
+    <!-- SOUL (heart) drawn via canvas-free SVG polygon -->
+    <svg id="soul" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+      <polygon points="8,14 2,6 2,3 5,1 8,4 11,1 14,3 14,6" fill="#ff0000"/>
+    </svg>
+  </div>
+
+  <div id="hud">
+    <div id="hp-label">HP: <span id="hp-value">20</span> / 20</div>
+    <div id="hp-bar-outer"><div id="hp-bar-inner" style="width:100%"></div></div>
+    <div id="score-label">Score: <span id="score-value">0</span></div>
+  </div>
+
+  <div id="message"></div>
+  <button id="restart-btn" onclick="startGame()">Try Again</button>
+
+  <div id="instructions">
+    Arrow keys / WASD to move the ❤ SOUL<br>
+    Survive as long as you can!
+  </div>
+
+  <script>
+    // ── constants ──────────────────────────────────────────────────────────────
+    const BOX_W = 232;   // inner width  (240 - 2*4 border)
+    const BOX_H = 172;   // inner height (180 - 2*4 border)
+    const SOUL_SIZE = 16;
+    const MAX_HP = 20;
+    const DAMAGE = 1;
+    const INVUL_MS = 800;
+    const MAX_FRAME_TIME = 0.05; // cap dt to 50 ms to avoid tunnelling after tab switch
+    const COLLISION_MARGIN = 3;  // px shrink on each side for a fairer hit-box
+    const BULLET_SPEED_BASE = 120;   // px / sec
+    const BULLET_SPEED_RAMP = 20;    // extra px/sec per 10 s
+    const SPAWN_INTERVAL_BASE = 900; // ms between spawns
+    const SPAWN_INTERVAL_MIN  = 300;
+    const SOUL_SPEED = 150;          // px / sec
+
+    // ── state ──────────────────────────────────────────────────────────────────
+    let soulX, soulY, hp, score, bullets, lastTime, running;
+    let invulUntil = 0;
+    let spawnTimer = 0;
+    let elapsed = 0; // total seconds survived
+
+    const keys = {};
+
+    // ── DOM refs ───────────────────────────────────────────────────────────────
+    const box        = document.getElementById("battle-box");
+    const soulEl     = document.getElementById("soul");
+    const hpValue    = document.getElementById("hp-value");
+    const hpBar      = document.getElementById("hp-bar-inner");
+    const scoreValue = document.getElementById("score-value");
+    const messageEl  = document.getElementById("message");
+    const restartBtn = document.getElementById("restart-btn");
+
+    // ── input ──────────────────────────────────────────────────────────────────
+    document.addEventListener("keydown", e => {
+      keys[e.key] = true;
+      e.preventDefault();
+    });
+    document.addEventListener("keyup", e => { keys[e.key] = false; });
+
+    // ── bullet factory ─────────────────────────────────────────────────────────
+    function spawnBullet() {
+      const speed = BULLET_SPEED_BASE + Math.floor(elapsed / 10) * BULLET_SPEED_RAMP;
+      // pick a random edge: 0=top 1=right 2=bottom 3=left
+      const edge = Math.floor(Math.random() * 4);
+      let x, y, vx, vy;
+      const spread = 0.4; // radians of random aim deviation
+
+      switch (edge) {
+        case 0: x = Math.random() * BOX_W; y = -6;      break;
+        case 1: x = BOX_W + 6;             y = Math.random() * BOX_H; break;
+        case 2: x = Math.random() * BOX_W; y = BOX_H + 6; break;
+        case 3: x = -6;                    y = Math.random() * BOX_H; break;
+      }
+
+      // aim toward SOUL with slight spread
+      const angle = Math.atan2(soulY - y, soulX - x) + (Math.random() - 0.5) * spread;
+      vx = Math.cos(angle) * speed;
+      vy = Math.sin(angle) * speed;
+
+      const el = document.createElement("div");
+      el.className = "bullet";
+      const size = 6 + (Math.random() * 6 | 0); // 6–11 px inclusive
+      el.style.width  = size + "px";
+      el.style.height = size + "px";
+      box.appendChild(el);
+
+      bullets.push({ x, y, vx, vy, size, el });
+    }
+
+    // ── game loop ──────────────────────────────────────────────────────────────
+    function loop(ts) {
+      if (!running) return;
+      const dt = Math.min((ts - lastTime) / 1000, MAX_FRAME_TIME);
+      lastTime = ts;
+      elapsed += dt;
+      score = Math.floor(elapsed * 10);
+      scoreValue.textContent = score;
+
+      // spawn
+      const spawnInterval = Math.max(SPAWN_INTERVAL_MIN,
+        SPAWN_INTERVAL_BASE - Math.floor(elapsed / 5) * 60);
+      spawnTimer -= dt * 1000;
+      if (spawnTimer <= 0) {
+        spawnBullet();
+        spawnTimer = spawnInterval;
+      }
+
+      // move SOUL
+      const up    = keys["ArrowUp"]    || keys["w"] || keys["W"];
+      const down  = keys["ArrowDown"]  || keys["s"] || keys["S"];
+      const left  = keys["ArrowLeft"]  || keys["a"] || keys["A"];
+      const right = keys["ArrowRight"] || keys["d"] || keys["D"];
+
+      if (up)    soulY -= SOUL_SPEED * dt;
+      if (down)  soulY += SOUL_SPEED * dt;
+      if (left)  soulX -= SOUL_SPEED * dt;
+      if (right) soulX += SOUL_SPEED * dt;
+
+      soulX = Math.max(0, Math.min(BOX_W - SOUL_SIZE, soulX));
+      soulY = Math.max(0, Math.min(BOX_H - SOUL_SIZE, soulY));
+
+      soulEl.style.left = soulX + "px";
+      soulEl.style.top  = soulY + "px";
+
+      // SOUL flicker during invulnerability
+      soulEl.style.opacity = (Date.now() < invulUntil && Math.floor(Date.now() / 80) % 2 === 0) ? "0.2" : "1";
+
+      // move & collide bullets
+      const now = Date.now();
+      const alive = [];
+      for (const b of bullets) {
+        b.x += b.vx * dt;
+        b.y += b.vy * dt;
+        b.el.style.left = b.x + "px";
+        b.el.style.top  = b.y + "px";
+
+        // remove off-screen bullets
+        if (b.x < -20 || b.x > BOX_W + 20 || b.y < -20 || b.y > BOX_H + 20) {
+          b.el.remove();
+          continue;
+        }
+
+        if (now >= invulUntil &&
+            b.x + b.size > soulX + COLLISION_MARGIN &&
+            b.x < soulX + SOUL_SIZE - COLLISION_MARGIN &&
+            b.y + b.size > soulY + COLLISION_MARGIN &&
+            b.y < soulY + SOUL_SIZE - COLLISION_MARGIN) {
+          hp = Math.max(0, hp - DAMAGE);
+          invulUntil = now + INVUL_MS;
+          updateHP();
+          if (hp <= 0) { gameOver(); return; }
+        }
+
+        alive.push(b);
+      }
+      bullets = alive;
+
+      requestAnimationFrame(loop);
+    }
+
+    function updateHP() {
+      hpValue.textContent = hp;
+      hpBar.style.width = (hp / MAX_HP * 100) + "%";
+      hpBar.style.background = hp > 8 ? "#ff0" : hp > 4 ? "#fa0" : "#f00";
+    }
+
+    function gameOver() {
+      running = false;
+      bullets.forEach(b => b.el.remove());
+      bullets = [];
+      messageEl.textContent = "* YOU DIED.  Score: " + score;
+      restartBtn.style.display = "inline-block";
+      soulEl.style.opacity = "0";
+    }
+
+    function startGame() {
+      // reset state
+      soulX = (BOX_W - SOUL_SIZE) / 2;
+      soulY = (BOX_H - SOUL_SIZE) / 2;
+      hp = MAX_HP;
+      score = 0;
+      bullets = [];
+      elapsed = 0;
+      spawnTimer = 0;
+      invulUntil = 0;
+      running = true;
+
+      updateHP();
+      scoreValue.textContent = "0";
+      messageEl.textContent = "";
+      restartBtn.style.display = "none";
+      soulEl.style.opacity = "1";
+
+      lastTime = performance.now();
+      requestAnimationFrame(loop);
+    }
+
+    // kick off
+    startGame();
+  </script>
+</body>
+</html>
